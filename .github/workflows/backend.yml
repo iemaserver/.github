@@ -1,0 +1,136 @@
+name: Deploy Node.js Express App
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      domain:
+        required: true
+        type: string
+      port:
+        required: false
+        type: string
+        default: '8000'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_BUCKET_NAME:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      S3_REGION:
+        required: false
+      JWT_ACCESS_TOKEN_EXPIRY:
+        required: false
+      JWT_ACCESS_TOKEN_SECRET:
+        required: false
+      JWT_REFRESH_TOKEN_EXPIRY:
+        required: false
+      JWT_REFRESH_TOKEN_SECRET:
+        required: false
+      MONGO_DEBUG:
+        required: false
+      MONGODB_URI:
+        required: false
+      RABBITMQ_URL:
+        required: false
+      REDIS_HOST:
+        required: false
+      REDIS_PORT:
+        required: false
+      SMTP_FROM:
+        required: false
+      SMTP_HOST:
+        required: false
+      SMTP_PASS:
+        required: false
+      SMTP_PORT:
+        required: false
+      SMTP_USER:
+        required: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: npm install --production
+
+      - name: Sync and Configure
+        run: |
+          APP_PORT="${{ inputs.port }}"
+
+          # Prepare Directory & Sync
+          sudo mkdir -p /var/www/backend/${{ inputs.app_name }}
+          sudo rsync -avz --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env*' \
+            . /var/www/backend/${{ inputs.app_name }}/
+
+          # Set Ownership
+          sudo chown -R $USER:$USER /var/www/backend/${{ inputs.app_name }}
+          sudo chmod -R 755 /var/www/backend/${{ inputs.app_name }}
+
+          # Inject Secrets into .env
+          cd /var/www/backend/${{ inputs.app_name }}
+          cat <<EOF > .env
+          PORT=$APP_PORT
+          AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_BUCKET_NAME=${{ secrets.AWS_BUCKET_NAME }}
+          AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_REGION=${{ secrets.S3_REGION }}
+          JWT_ACCESS_TOKEN_EXPIRY=${{ secrets.JWT_ACCESS_TOKEN_EXPIRY }}
+          JWT_ACCESS_TOKEN_SECRET=${{ secrets.JWT_ACCESS_TOKEN_SECRET }}
+          JWT_REFRESH_TOKEN_EXPIRY=${{ secrets.JWT_REFRESH_TOKEN_EXPIRY }}
+          JWT_REFRESH_TOKEN_SECRET=${{ secrets.JWT_REFRESH_TOKEN_SECRET }}
+          MONGO_DEBUG=${{ secrets.MONGO_DEBUG }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          RABBITMQ_URL=${{ secrets.RABBITMQ_URL }}
+          REDIS_HOST=${{ secrets.REDIS_HOST }}
+          REDIS_PORT=${{ secrets.REDIS_PORT }}
+          SMTP_FROM=${{ secrets.SMTP_FROM }}
+          SMTP_HOST=${{ secrets.SMTP_HOST }}
+          SMTP_PASS=${{ secrets.SMTP_PASS }}
+          SMTP_PORT=${{ secrets.SMTP_PORT }}
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          EOF
+
+          # Setup Nginx
+          sudo tee /etc/nginx/sites-available/${{ inputs.app_name }} > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name ${{ inputs.domain }};
+              location / {
+                  proxy_pass http://localhost:$APP_PORT;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+          }
+          EOF
+
+          sudo ln -sf /etc/nginx/sites-available/${{ inputs.app_name }} \
+            /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t && sudo systemctl reload nginx
+
+      - name: PM2 Deployment
+        run: |
+          cd /var/www/backend/${{ inputs.app_name }}
+          pm2 delete ${{ inputs.app_name }} || true
+          pm2 start app.js --name ${{ inputs.app_name }} --update-env
+          pm2 save
+          sleep 2
+          pm2 list
+          pm2 status ${{ inputs.app_name }}
+
+      - name: Done
+        run: echo "✅ ${{ inputs.app_name }} deployed at http://${{ inputs.domain }}:${{ inputs.port }}"
