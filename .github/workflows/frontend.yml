@@ -1,0 +1,65 @@
+name: Deploy React Vite App
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      domain:
+        required: true
+        type: string
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Build Project
+        run: npm run build
+
+      - name: Sync and Configure Nginx
+        run: |
+          sudo mkdir -p /var/www/html/${{ inputs.app_name }}
+          sudo rsync -avz --delete dist/ /var/www/html/${{ inputs.app_name }}/
+          sudo chown -R www-data:www-data /var/www/html/${{ inputs.app_name }}
+          sudo chmod -R 755 /var/www/html/${{ inputs.app_name }}
+
+          if ! command -v nginx >/dev/null 2>&1; then
+            sudo apt update
+            sudo apt install -y nginx
+          fi
+
+          sudo mkdir -p /etc/nginx/sites-available
+          sudo mkdir -p /etc/nginx/sites-enabled
+
+          sudo tee /etc/nginx/sites-available/${{ inputs.app_name }} > /dev/null <<EOF
+          server {
+              listen 80;
+              server_name ${{ inputs.domain }};
+              root /var/www/html/${{ inputs.app_name }};
+              index index.html;
+              location / {
+                  try_files \$uri \$uri/ /index.html;
+              }
+          }
+          EOF
+
+          sudo ln -sf /etc/nginx/sites-available/${{ inputs.app_name }} \
+            /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t && sudo systemctl restart nginx
+
+      - name: Done
+        run: echo "✅ ${{ inputs.app_name }} deployed at http://${{ inputs.domain }}"
